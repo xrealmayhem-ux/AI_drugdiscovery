@@ -1,23 +1,23 @@
 """
-score_5ht2a.py — Scorer externo para REINVENT4
-================================================
-Puente entre REINVENT4 (ExternalProcess) y un modelo Chemprop v2 (.ckpt).
+scorer.py — External scorer for REINVENT4
+|||||||||||||||||||||||||||||||||||||||||
+Bridge between REINVENT4 (ExternalProcess) and a Chemprop v2 model (.ckpt).
 
-REINVENT4 puede llamar este script de dos formas:
+REINVENT4 can call this script in two ways:
 
-  Modo 1 — stdin (ExternalProcess en RL):
-    echo "SMILES1\nSMILES2" | python score_5ht2a.py
+  Mode 1 — stdin (ExternalProcess during RL):
+    echo "SMILES1\nSMILES2" | python scorer.py
 
-  Modo 2 — CSV como argumento (llamada manual / verificación):
-    python score_5ht2a.py <smiles_csv>
+  Mode 2 — CSV as argument (manual call / verification):
+    python scorer.py <smiles_csv>
 
-El script imprime en stdout un CSV con columnas "SMILES,score,pActivity_pred".
+The script prints to stdout a CSV with columns "SMILES,score,pActivity_pred".
 
-El score es la pActivity predicha transformada por una sigmoide:
+The score is the predicted pActivity transformed by a sigmoid:
     score = sigmoid(pActivity; low=6.0, high=9.0, k=0.5)
-    → score ≈ 0 para pActivity ≤ 5  (Ki ≥ 10 µM, inactivo)
-    → score ≈ 0.5 para pActivity = 7.5 (Ki ≈ 30 nM)
-    → score ≈ 1 para pActivity ≥ 9  (Ki ≤ 1 nM, muy potente)
+     score ≈ 0 for pActivity ≤ 5  (≥ 10 µM, inactive)
+     score ≈ 0.5 for pActivity = 7.5 (≈ 30 nM)
+     score ≈ 1 for pActivity ≥ 9  (≤ 1 nM, very potent)
 """
 
 import sys
@@ -30,21 +30,21 @@ from pathlib import Path
 
 warnings.filterwarnings("ignore")
 
-# ─── Checkpoint — path absoluto relativo al script (funciona desde cualquier CWD)
+# ─── Checkpoint — absolute path relative to the script (works from any CWD)
 _SCRIPT_DIR = Path(__file__).resolve().parent
-CHECKPOINT  = str(_SCRIPT_DIR / "chemprop_model" / "best-epoch=28-val_loss=0.4784.ckpt")
+CHECKPOINT  = str(_SCRIPT_DIR / "chemprop_model" / "MPNN_5ht2a.ckpt")
 
-# Parámetros de la sigmoide (calibrados contra el rango real del modelo)
-# pActivity dataset: min=4, media=7.15, max=11, RMSE modelo=0.85
-SIG_LOW  = 6.0   # pActivity donde el score empieza a subir (Ki = 1 µM)
-SIG_MID  = 7.5   # punto de inflexión (Ki ≈ 30 nM)  → score = 0.5
-SIG_HIGH = 9.0   # pActivity donde el score satura   (Ki = 1 nM)
-SIG_K    = 0.8   # pendiente; más alto = más selectivo hacia alta potencia
+# Sigmoid parameters (calibrated against the model's real output range)
+# pActivity dataset: min=4, mean=7.15, max=11, model RMSE=0.85
+SIG_LOW  = 6.0   # pActivity where the score starts to rise (Ki = 1 µM)
+SIG_MID  = 7.5   # inflection point (Ki ≈ 30 nM)  → score = 0.5
+SIG_HIGH = 9.0   # pActivity where the score saturates   (Ki = 1 nM)
+SIG_K    = 0.8   # slope; higher = more selective towards high potency
 
 # ─────────────────────────────────────────────────────────────────────────────
 
 def sigmoid_transform(x: float, mid: float = SIG_MID, k: float = SIG_K) -> float:
-    """Sigmoide estándar centrada en `mid` con pendiente `k`."""
+    """Standard sigmoid centered at `mid` with slope `k`."""
     try:
         return 1.0 / (1.0 + math.exp(-k * (x - mid)))
     except (OverflowError, ValueError):
@@ -52,7 +52,7 @@ def sigmoid_transform(x: float, mid: float = SIG_MID, k: float = SIG_K) -> float
 
 
 def load_model(ckpt_path: str):
-    """Carga el modelo chemprop v2 desde el checkpoint de Lightning."""
+    """Loads the Chemprop v2 MPNN model from a Lightning checkpoint into CPU memory."""
     from chemprop import models
     model = models.MPNN.load_from_checkpoint(ckpt_path, map_location="cpu")
     model.eval()
@@ -60,7 +60,16 @@ def load_model(ckpt_path: str):
 
 
 def predict_pactivity(smiles_list: list, model) -> np.ndarray:
-    """Predice pActivity para una lista de SMILES. Devuelve NaN para inválidos."""
+    """
+    Predicts pActivity for a list of SMILES strings.
+
+    Args:
+        smiles_list (list): List of SMILES strings to evaluate.
+        model: A loaded Chemprop MPNN model.
+
+    Returns:
+        np.ndarray: Array of predicted pActivity values. Invalid SMILES get NaN.
+    """
     import os
     import logging
     import sys as _sys
@@ -68,7 +77,7 @@ def predict_pactivity(smiles_list: list, model) -> np.ndarray:
     from rdkit import Chem, RDLogger
     RDLogger.DisableLog("rdApp.*")
 
-    # Silenciar Lightning — sus mensajes de Tips/GPU no deben contaminar stdout
+    # Silence Lightning — its Tips/GPU messages must not contaminate stdout
     logging.getLogger("lightning.pytorch").setLevel(logging.ERROR)
     logging.getLogger("lightning").setLevel(logging.ERROR)
     os.environ["PYTORCH_LIGHTNING_SUPPRESS_TIPS"] = "1"
@@ -93,8 +102,8 @@ def predict_pactivity(smiles_list: list, model) -> np.ndarray:
     with torch.no_grad():
         import lightning.pytorch as pl
 
-        # Redirigir stdout → stderr durante trainer.predict
-        # para que los mensajes de Lightning no contaminen el CSV de salida
+        # Redirect stdout → stderr during trainer.predict
+        # so Lightning messages don't contaminate the CSV/JSON output
         _real_stdout = _sys.stdout
         _sys.stdout  = _sys.stderr
         try:
@@ -107,7 +116,7 @@ def predict_pactivity(smiles_list: list, model) -> np.ndarray:
             )
             raw = trainer.predict(model, dataloaders=loader)
         finally:
-            _sys.stdout = _real_stdout  # restaurar siempre
+            _sys.stdout = _real_stdout  # always restore
 
     values = torch.cat(raw).squeeze().numpy()
     if values.ndim == 0:
@@ -120,23 +129,47 @@ def predict_pactivity(smiles_list: list, model) -> np.ndarray:
 
 
 def main():
+    """
+    Entry point. Determines input mode, runs a single prediction pass,
+    and formats the output accordingly (JSON for REINVENT4, CSV for manual use).
+    """
     import json
 
-    # ── Modo 1: REINVENT4 — stdin + JSON output ───────────────────────────────
+    # ── Step 1: Parse input based on invocation mode ──────────────────────────
     if len(sys.argv) == 1:
+        # Mode 1: REINVENT4 pipes SMILES via stdin, expects JSON back
         raw = sys.stdin.read().strip()
         if not raw:
             print(json.dumps({"score": [], "pActivity_pred": []}))
             return
         smiles_list = [s.strip() for s in raw.splitlines() if s.strip()]
+        output_mode = "json"
+        smiles_col  = None
 
-        model     = load_model(CHECKPOINT)
-        pactivity = predict_pactivity(smiles_list, model)
-        scores    = np.array([
-            sigmoid_transform(v) if not np.isnan(v) else 0.0
-            for v in pactivity
-        ])
+    elif len(sys.argv) == 2:
+        # Mode 2: Manual call with a CSV file, returns CSV
+        df = pd.read_csv(sys.argv[1])
+        smiles_col  = next(
+            (c for c in df.columns if c.lower() == "smiles"),
+            df.columns[0]
+        )
+        smiles_list = df[smiles_col].astype(str).tolist()
+        output_mode = "csv"
 
+    else:
+        print("Usage: python scorer.py [<smiles_csv>]", file=sys.stderr)
+        sys.exit(1)
+
+    # ── Step 2: Run prediction (single pass for both modes) ───────────────────
+    model     = load_model(CHECKPOINT)
+    pactivity = predict_pactivity(smiles_list, model)
+    scores    = np.array([
+        sigmoid_transform(v) if not np.isnan(v) else 0.0
+        for v in pactivity
+    ])
+
+    # ── Step 3: Format and print output ───────────────────────────────────────
+    if output_mode == "json":
         print(json.dumps({
             "payload": {
                 "score":          [round(float(s), 6) for s in scores],
@@ -144,33 +177,13 @@ def main():
                                    for v in pactivity],
             }
         }))
-
-    # ── Modo 2: llamada manual — CSV input + CSV output ───────────────────────
-    elif len(sys.argv) == 2:
-        df = pd.read_csv(sys.argv[1])
-        smiles_col  = next(
-            (c for c in df.columns if c.lower() == "smiles"),
-            df.columns[0]
-        )
-        smiles_list = df[smiles_col].astype(str).tolist()
-
-        model     = load_model(CHECKPOINT)
-        pactivity = predict_pactivity(smiles_list, model)
-        scores    = np.array([
-            sigmoid_transform(v) if not np.isnan(v) else 0.0
-            for v in pactivity
-        ])
-
+    else:
         out = pd.DataFrame({
             smiles_col:       smiles_list,
             "score":          scores.round(6),
             "pActivity_pred": np.round(pactivity, 3),
         })
         print(out.to_csv(index=False), end="")
-
-    else:
-        print("Uso: python score_5ht2a.py [<smiles_csv>]", file=sys.stderr)
-        sys.exit(1)
 
 
 if __name__ == "__main__":
