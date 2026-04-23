@@ -70,6 +70,7 @@ def prepare_smiles():
     log("Step 1: Preparing data for Transfer Learning")
     all_smiles = TL_SMILES_FILE.read_text().strip().splitlines()
     all_smiles = [s.split()[0] for s in all_smiles if s.strip()]
+    random.shuffle(all_smiles)  # Prevent biased split if file is ordered by source
     n_train = int(len(all_smiles) * 0.8)
     tl_train = all_smiles[:n_train]
     tl_val = all_smiles[n_train:]
@@ -133,7 +134,7 @@ name   = "TPSA"
 weight = 0.4
 transform.type = "reverse_sigmoid"
 transform.high = 90.0
-transform.low  = 0.0
+transform.low  = 20.0
 transform.k    = 0.5
 """
 
@@ -237,9 +238,48 @@ name   = "TPSA"
 weight = 0.2
 transform.type = "reverse_sigmoid"
 transform.high = 90.0
-transform.low  = 0.0
+transform.low  = 20.0
 transform.k    = 0.5
 """
+
+def select_best_tl_checkpoint(log_file, checkpoints):
+    """
+    Selects the TL checkpoint with the lowest validation NLL.
+    Parses the REINVENT4 TL log to find per-epoch validation metrics.
+    Falls back to the last checkpoint if parsing fails.
+    """
+    import re
+
+    log_path = Path(log_file)
+    if not log_path.exists():
+        log("  TL log not found, using last checkpoint")
+        return checkpoints[-1]
+
+    log_text = log_path.read_text()
+    epoch_nll = {}
+
+    # REINVENT4 TL logs: "  epoch  total | train_nll | valid_nll | ..."
+    for match in re.finditer(
+        r'^\s*(\d+)\s+\d+\s*\|\s*[\d.]+\s*\|\s*([\d.]+)', log_text, re.MULTILINE
+    ):
+        epoch = int(match.group(1))
+        val_nll = float(match.group(2))
+        epoch_nll[epoch] = val_nll
+
+    if not epoch_nll:
+        log("  Could not parse validation NLL from TL log, using last checkpoint")
+        return checkpoints[-1]
+
+    best_epoch = min(epoch_nll, key=epoch_nll.get)
+    log(f"  Best validation NLL = {epoch_nll[best_epoch]:.2f} at epoch {best_epoch}")
+
+    # Match checkpoint to best epoch
+    for ckpt in checkpoints:
+        if f".{best_epoch}.chkpt" in ckpt.name:
+            return ckpt
+
+    log(f"  Checkpoint for epoch {best_epoch} not found, using last checkpoint")
+    return checkpoints[-1]
 
 def main():
     """
@@ -271,7 +311,7 @@ def main():
     if not tl_ckpts:
         log("ERROR: No checkpoints generated for Transfer Learning")
         sys.exit(1)
-    tl_model = tl_ckpts[-1]
+    tl_model = select_best_tl_checkpoint(OUT_DIR / "tl.log", tl_ckpts)
     log(f"  Using: {tl_model.name}")
 
     log("Step 4: Stage 2 RL with ChemProp")
